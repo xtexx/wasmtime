@@ -5,6 +5,7 @@ use cranelift_codegen::ir::function::FunctionParameters;
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{FinalizedMachReloc, MachTrap};
 use std::fmt::Write;
+use std::process::{Command, Stdio};
 
 fn print_relocs(func_params: &FunctionParameters, relocs: &[FinalizedMachReloc]) -> String {
     let mut text = String::new();
@@ -106,8 +107,21 @@ pub fn print_all(
     relocs: &[FinalizedMachReloc],
     traps: &[MachTrap],
 ) -> Result<()> {
+    println!("Function {}:", func.name);
     print_bytes(&mem);
-    print_disassembly(func, isa, &mem[0..code_size as usize])?;
+    if isa.name() == "loongarch" {
+        let mut disasm = Command::new("pwn")
+            .args(&["disasm", "-c", "loongarch64"])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        <dyn std::io::Write>::write_all(
+            disasm.stdin.as_mut().unwrap(),
+            &mem[0..code_size as usize],
+        )?;
+        _ = disasm.wait()?;
+    } else {
+        print_disassembly(func, isa, &mem[0..code_size as usize])?;
+    }
     if print {
         println!(
             "\n{}\n{}",
