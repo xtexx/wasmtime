@@ -1,0 +1,350 @@
+;; LoongArch instruction selection and CLIF-to-MachInst lowering.
+
+;; The main lowering constructor term: takes a clif `Inst` and returns the
+;; register(s) within which the lowered instruction's result values live.
+(decl partial lower (Inst) InstOutput)
+
+(rule (lower (has_type ty (iconst _ (u64_from_imm64 n))))
+  (imm ty n))
+
+;;(rule (lower (has_type (ty_supported_vec ty) (vconst _ n)))
+;;  (gen_constant ty (const_to_vconst n)))
+
+(rule (lower (f16const _ (u16_from_ieee16 n)))
+  (imm $F16 n))
+
+(rule (lower (f32const _ (u32_from_ieee32 n)))
+  (imm $F32 n))
+
+(rule (lower (f64const _ (u64_from_ieee64 n)))
+  (imm $F64 n))
+
+;;(rule (lower (f128const _ (u128_from_constant n)))
+;;  (value_regs (imm $I64 (u128_low_bits n)) (imm $I64 (u128_high_bits n))))
+
+;;(rule 1 (lower (f128const _ (u128_from_constant (u128_replicated_u64 n))))
+;;  (let ((r Reg (imm $I64 n)))
+;;    (value_regs r r)))
+
+(rule (lower (return args))
+  (lower_return args))
+
+;; Direct call to an in-range function.
+(rule 1 (lower (call (func_ref_data sig_ref name (RelocDistance.Near) patchable) args))
+      (let ((output ValueRegsVec (gen_call_output sig_ref))
+            (abi Sig (abi_sig sig_ref))
+            (uses CallArgList (gen_call_args abi args))
+            (defs CallRetList (gen_call_rets abi output))
+            (info BoxCallInfo (gen_call_info abi name uses defs (try_call_none) patchable))
+            (_ Unit (emit_side_effect (la_call_impl info))))
+        output))
+
+;; Direct call to an out-of-range function (implicitly via pointer).
+(rule (lower (call (func_ref_data sig_ref name dist false) args))
+      (let ((output ValueRegsVec (gen_call_output sig_ref))
+            (abi Sig (abi_sig sig_ref))
+            (uses CallArgList (gen_call_args abi args))
+            (defs CallRetList (gen_call_rets abi output))
+            (target Reg (load_ext_name name 0 dist))
+            (info BoxCallIndInfo (gen_call_ind_info abi target uses defs (try_call_none)))
+            (_ Unit (emit_side_effect (la_call_ind_impl info))))
+        output))
+
+;; Indirect call.
+(rule (lower (call_indirect sig_ref ptr args))
+      (let ((output ValueRegsVec (gen_call_output sig_ref))
+            (abi Sig (abi_sig sig_ref))
+            (target Reg (put_in_reg ptr))
+            (uses CallArgList (gen_call_args abi args))
+            (defs CallRetList (gen_call_rets abi output))
+            (info BoxCallIndInfo (gen_call_ind_info abi target uses defs (try_call_none)))
+            (_ Unit (emit_side_effect (la_call_ind_impl info))))
+        output))
+
+;;;; Rules for `iadd` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (has_type $I64 (iadd _ x y)))
+  (la_add_d x y))
+
+(rule -1 (lower (has_type (fits_in_32 (ty_int ty)) (iadd _ x y)))
+  (la_add_w x y))
+
+;;;; Rules for `isub` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (has_type $I64 (isub _ x y)))
+  (la_sub_d x y))
+
+(rule -1 (lower (has_type (fits_in_32 (ty_int ty)) (isub _ x y)))
+  (la_sub_w (sext x) (sext y)))
+
+;;;; Rules for `ineg` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (has_type $I64 (ineg _ x)))
+  (la_sub_d (zero_reg) x))
+
+(rule -1 (lower (has_type (fits_in_32 (ty_int ty)) (ineg _ x)))
+  (la_sub_w (zero_reg) (sext x)))
+
+;;;; Rules for `bnot` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule 0 (lower (bnot (ty_int_ref_scalar_64_extract _) x))
+  (la_nor x (zero_reg)))
+
+(rule 1 (lower (bnot (ty_supported_float ty) x))
+  (la_move_to_fpr ty (la_nor (la_move_to_gpr ty x) (zero_reg))))
+
+(rule 2 (lower (bnot (ty_reg_pair _) x))
+  (value_regs
+    (la_nor (value_regs_get x 0) (zero_reg))
+    (la_nor (value_regs_get x 1) (zero_reg))))
+
+;;;; Rules for `band` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (band (ty_int ty) x y))
+  (gen_and ty x y))
+
+;; Special cases for when one operand is an immediate that fits in 12 bits.
+(rule 1 (lower (band (fits_in_gpr (ty_int ty)) x (uimm12_from_value y)))
+  (la_andi x y))
+
+(rule 2 (lower (band (fits_in_gpr (ty_int ty)) (uimm12_from_value x) y))
+  (la_andi y x))
+
+(rule 3 (lower (band (ty_supported_float ty) x y))
+  (la_move_to_fpr ty (la_and (la_move_to_gpr ty x) (la_move_to_gpr ty y))))
+
+(rule 4 (lower (band (fits_in_gpr (ty_int ty)) x (bnot _ y)))
+  (la_andn x y))
+
+(rule 5 (lower (band (fits_in_gpr (ty_int ty)) (bnot _ y) x))
+  (la_andn x y))
+
+(rule 6 (lower (band (ty_reg_pair _) x (bnot _ y)))
+  (let ((low Reg (la_andn (value_regs_get x 0) (value_regs_get y 0)))
+        (high Reg (la_andn (value_regs_get x 1) (value_regs_get y 1))))
+    (value_regs low high)))
+
+(rule 7 (lower (band (ty_reg_pair _) (bnot _ y) x))
+  (let ((low Reg (la_andn (value_regs_get x 0) (value_regs_get y 0)))
+        (high Reg (la_andn (value_regs_get x 1) (value_regs_get y 1))))
+    (value_regs low high)))
+
+;;;; Rules for `bor` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule -1 (lower (bor (ty_int ty) x y))
+  (gen_or ty x y))
+
+;; Special cases for when one operand is an immediate that fits in 12 bits.
+(rule 1 (lower (bor (fits_in_gpr (ty_int ty)) x (uimm12_from_value y)))
+  (la_ori x y))
+
+(rule 2 (lower (bor (fits_in_gpr (ty_int ty)) (uimm12_from_value x) y))
+  (la_ori y x))
+
+(rule 3 (lower (bor (ty_supported_float ty) x y))
+  (la_move_to_fpr ty (la_or (la_move_to_gpr ty x) (la_move_to_gpr ty y))))
+
+;; Specialized lowerings for `(bor x (bnot y))` which is additionally produced
+;; by Cranelift's `bor_not` builder method, which emits the simpler
+;; forms early on.
+
+(rule 5 (lower (bor (fits_in_gpr (ty_int ty)) x (bnot _ y)))
+  (la_orn x y))
+
+(rule 6 (lower (bor (fits_in_gpr (ty_int ty)) (bnot _ y) x))
+  (la_orn x y))
+
+(rule 7 (lower (bor (ty_reg_pair _) x (bnot _ y)))
+  (let ((low Reg (la_orn (value_regs_get x 0) (value_regs_get y 0)))
+        (high Reg (la_orn (value_regs_get x 1) (value_regs_get y 1))))
+    (value_regs low high)))
+
+(rule 8 (lower (bor (ty_reg_pair _) (bnot _ y) x))
+  (let ((low Reg (la_orn (value_regs_get x 0) (value_regs_get y 0)))
+        (high Reg (la_orn (value_regs_get x 1) (value_regs_get y 1))))
+    (value_regs low high)))
+
+;;;; Rules for `xor` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (bxor (ty_int ty) x y))
+  (gen_xor ty x y))
+
+;; Special cases for when one operand is an immediate that fits in 12 bits.
+(rule 1 (lower (bxor (fits_in_gpr (ty_int ty)) x (uimm12_from_value y)))
+  (la_xori x y))
+
+(rule 2 (lower (bxor (fits_in_gpr (ty_int ty)) (uimm12_from_value x) y))
+  (la_xori y x))
+
+(rule 3 (lower (bxor (ty_supported_float ty) x y))
+  (la_move_to_fpr ty (la_xor (la_move_to_gpr ty x) (la_move_to_gpr ty y))))
+
+;;;;;  Rules for `func_addr`;;;;;;;;;
+(rule
+  (lower (func_addr _ (func_ref_data _ name dist _)))
+  (load_ext_name name 0 dist))
+
+;;;; Rules for `ctz` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (ctz (fits_in_16 (ty_int _)) x))
+  (la_ctz_w (zext x)))
+(rule 1 (lower (ctz (ty_32 (ty_int _)) x))
+  (la_ctz_w x))
+(rule 2 (lower (ctz (ty_64 (ty_int _)) x))
+  (la_ctz_d x))
+
+;;;; Rules for `clz` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (clz (fits_in_16 (ty_int ty)) x))
+  (la_addi_w (la_clz_w (zext x)) (simm (i32_sub 32 (ty_bits ty)))))
+(rule 1 (lower (clz (ty_32 (ty_int _)) x))
+  (la_clz_w x))
+(rule 2 (lower (clz (ty_64 (ty_int _)) x))
+  (la_clz_d x))
+
+;;;; Rules for `fadd` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fadd $F32 x y))
+  (if-let true (has_f))
+  (la_fadd_s x y))
+(rule 0 (lower (fadd $F64 x y))
+  (if-let true (has_d))
+  (la_fadd_d x y))
+
+;;;; Rules for `fsub` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fsub $F32 x y))
+  (if-let true (has_f))
+  (la_fsub_s x y))
+(rule 0 (lower (fsub $F64 x y))
+  (if-let true (has_d))
+  (la_fsub_d x y))
+
+;;;; Rules for `fmax` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fmax $F32 x y))
+  (if-let true (has_f))
+  (la_fmax_s x y))
+(rule 0 (lower (fmax $F64 x y))
+  (if-let true (has_d))
+  (la_fmax_d x y))
+
+;;;; Rules for `fmin` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fmin $F32 x y))
+  (if-let true (has_f))
+  (la_fmin_s x y))
+(rule 0 (lower (fmin $F64 x y))
+  (if-let true (has_d))
+  (la_fmin_d x y))
+
+;;;; Rules for `fabs` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fabs $F32 x))
+  (if-let true (has_f))
+  (la_fabs_s x))
+(rule 0 (lower (fabs $F64 x))
+  (if-let true (has_d))
+  (la_fabs_d x))
+
+;;;; Rules for `fneg` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (fneg $F32 x))
+  (if-let true (has_f))
+  (la_fneg_s x))
+(rule 0 (lower (fneg $F64 x))
+  (if-let true (has_d))
+  (la_fneg_d x))
+
+;;;; Rules for `icmp` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; 8-64 bit comparisons. Mostly fall back onto `IntegerCompare` and then
+;; materializing that, but before that happens try to match some
+;; constant-related patterns
+
+(rule 0 (lower (icmp _ cc x @ (value_type (fits_in_gpr ty)) y))
+  (lower_icmp cc x y))
+
+; Recursion: at most once to implement >= in terms of <.
+(decl rec lower_icmp (IntCC Value Value) Reg)
+(rule 0 (lower_icmp cc x y)
+  (lower_int_compare (icmp_to_int_compare cc x y)))
+
+;; a == $imm => seqz(xori(..))
+(rule 1 (lower_icmp (IntCC.Equal) x y)
+  (if-let (u32_from_iconst (u32_extract_non_zero (uimm12_from_u32 imm))) y)
+  (la_sltui (la_xori (sext x) imm) (simm 1)))
+(rule 2 (lower_icmp (IntCC.Equal) x y)
+  (if-let (u32_from_iconst (u32_extract_non_zero (uimm12_from_u32 imm))) x)
+  (la_sltui (la_xori (sext y) imm) (simm 1)))
+
+;; a != $imm => snez(xori(..))
+(rule 1 (lower_icmp (IntCC.NotEqual) x y)
+  (if-let (u32_from_iconst (u32_extract_non_zero (uimm12_from_u32 imm))) y)
+  (la_slt (zero_reg) (la_xori (sext x) imm)))
+(rule 2 (lower_icmp (IntCC.NotEqual) x y)
+  (if-let (u32_from_iconst (u32_extract_non_zero (uimm12_from_u32 imm))) x)
+  (la_slt (zero_reg) (la_xori (sext y) imm)))
+
+;; a < $imm => slti(..)
+(rule 1 (lower_icmp (IntCC.SignedLessThan) x y)
+  (if-let (i32_from_iconst (i32_extract_non_zero (simm12_from_i32 imm))) y)
+  (la_slti (sext x) imm))
+(rule 1 (lower_icmp (IntCC.SignedGreaterThan) x y)
+  (if-let (i32_from_iconst (i32_extract_non_zero (simm12_from_i32 imm))) x)
+  (la_slti (sext y) imm))
+(rule 1 (lower_icmp (IntCC.UnsignedLessThan) x y)
+  (if-let (i32_from_iconst (i32_extract_non_zero (simm12_from_i32 imm))) y)
+  (la_sltui (zext x) imm))
+(rule 1 (lower_icmp (IntCC.UnsignedGreaterThan) x y)
+  (if-let (i32_from_iconst (i32_extract_non_zero (simm12_from_i32 imm))) x)
+  (la_sltui (zext y) imm))
+
+;; a >= $imm => !(a < $imm)
+(rule 2 (lower_icmp cc @ (IntCC.SignedGreaterThanOrEqual) x y)
+  (if-let (i32_from_iconst (i32_extract_non_zero (simm12_from_i32 _))) y)
+  (la_xori (lower_icmp (intcc_complement cc) x y) (uimm 1)))
+(rule 2 (lower_icmp cc @ (IntCC.UnsignedGreaterThanOrEqual) x y)
+  (if-let (u32_from_iconst (u32_extract_non_zero (uimm12_from_u32 _))) y)
+  (la_xori (lower_icmp (intcc_complement cc) x y) (uimm 1)))
+
+;; Materializes an `IntegerCompare` bundle directly into an `Reg` with a 0
+;; or 1 value.
+(decl lower_int_compare (IntegerCompare) Reg)
+
+;; x == y => x ^ y == 0
+(rule 0 (lower_int_compare (int_compare_decompose (IntCC.Equal) x y))
+  (la_sltui (la_xor x y) (simm 1)))
+(rule 1 (lower_int_compare (int_compare_decompose (IntCC.Equal) x (zero_reg)))
+  (la_sltui x (simm 1)))
+(rule 2 (lower_int_compare (int_compare_decompose (IntCC.Equal) (zero_reg) y))
+  (la_sltui y (simm 1)))
+;; x != y => x ^ y != 0
+(rule 0 (lower_int_compare (int_compare_decompose (IntCC.NotEqual) x y))
+  (la_sltu (zero_reg) (la_xor x y)))
+(rule 1 (lower_int_compare (int_compare_decompose (IntCC.NotEqual) x (zero_reg)))
+  (la_sltu (zero_reg) x))
+(rule 2 (lower_int_compare (int_compare_decompose (IntCC.NotEqual) (zero_reg) x))
+  (la_sltu (zero_reg) x))
+;; x < y => x < y
+(rule (lower_int_compare (int_compare_decompose (IntCC.SignedLessThan) x y))
+  (la_slt x y))
+(rule (lower_int_compare (int_compare_decompose (IntCC.UnsignedLessThan) x y))
+  (la_sltu x y))
+;; x > y => y < x
+(rule (lower_int_compare (int_compare_decompose (IntCC.SignedGreaterThan) x y))
+  (la_slt y x))
+(rule (lower_int_compare (int_compare_decompose (IntCC.UnsignedGreaterThan) x y))
+  (la_sltu y x))
+;; x <= y => !(y < x)
+(rule (lower_int_compare (int_compare_decompose (IntCC.SignedLessThanOrEqual) x y))
+  (la_xori (la_slt y x) (uimm 1)))
+(rule (lower_int_compare (int_compare_decompose (IntCC.UnsignedLessThanOrEqual) x y))
+  (la_xori (la_sltu y x) (uimm 1)))
+;; x >= y => !(x < y)
+(rule (lower_int_compare (int_compare_decompose (IntCC.SignedGreaterThanOrEqual) x y))
+  (la_xori (la_slt x y) (uimm 1)))
+(rule (lower_int_compare (int_compare_decompose (IntCC.UnsignedGreaterThanOrEqual) x y))
+  (la_xori (la_sltu x y) (uimm 1)))
+
+;;;; Rules for `uextend` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (uextend (fits_in_gpr _) val))
+  (zext val))
+
+(rule 1 (lower (uextend $I128 val))
+  (value_regs (zext val) (imm $I64 0)))
+
+;;;; Rules for `sextend` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule 0 (lower (sextend (fits_in_gpr _) val @ (value_type in_ty)))
+  (sext val))
+
+;; TODO: LA32
+(rule 1 (lower (sextend $I128 val @ (value_type in_ty)))
+  (let ((lo Reg (sext val)))
+    (value_regs lo (la_srai_d lo (uimm 63)))))

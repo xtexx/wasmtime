@@ -407,13 +407,13 @@ impl Type {
 
     /// Gets a bit-level representation of the type. Used only
     /// internally for efficiently storing types.
-    pub(crate) fn repr(self) -> u16 {
+    pub(crate) const fn repr(self) -> u16 {
         self.0
     }
 
     /// Converts from a bit-level representation of the type back to a
     /// `Type`.
-    pub(crate) fn from_repr(bits: u16) -> Type {
+    pub(crate) const fn from_repr(bits: u16) -> Type {
         Type(bits)
     }
 }

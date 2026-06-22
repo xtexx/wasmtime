@@ -4,6 +4,7 @@ target x86_64
 target aarch64
 target s390x
 target riscv64
+target loongarch64
 
 function %select_self(i8, i32) -> i32 {
 block0(v0: i8, v1: i32):

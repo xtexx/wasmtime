@@ -120,6 +120,23 @@ pub enum Reloc {
     /// <https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#pc-relative-symbol-addresses>
     RiscvGotHi20,
 
+    /// `R_LARCH_B16`
+    LoongArchB16,
+    /// `R_LARCH_B21`
+    LoongArchB21,
+    /// `R_LARCH_B26`
+    LoongArchB26,
+    /// `R_LARCH_CALL36`
+    LoongArchCall36,
+    /// `R_LARCH_PCALA_LO12`
+    LoongArchPcalaLo12,
+    /// `R_LARCH_PCALA_HI20`
+    LoongArchPcalaHi20,
+    /// `R_LARCH_PCALA64_LO20`
+    LoongArchPcala64Lo20,
+    /// `R_LARCH_PCALA64_HI12`
+    LoongArchPcala64Hi12,
+
     /// High 20 bits of a 32-bit PC-relative offset relocation
     ///
     /// This is the `R_RISCV_PCREL_HI20` relocation from the RISC-V ELF psABI document.
@@ -174,6 +191,14 @@ impl fmt::Display for Reloc {
             Self::Aarch64AddAbsLo12Nc => write!(f, "Aarch64AddAbsLo12Nc"),
             Self::S390xTlsGd64 => write!(f, "TlsGd64"),
             Self::S390xTlsGdCall => write!(f, "TlsGdCall"),
+            Self::LoongArchB16 => write!(f, "B16"),
+            Self::LoongArchB21 => write!(f, "B21"),
+            Self::LoongArchB26 => write!(f, "B26"),
+            Self::LoongArchCall36 => write!(f, "CALL36"),
+            Self::LoongArchPcalaLo12 => write!(f, "PCALA_LO12"),
+            Self::LoongArchPcalaHi20 => write!(f, "PCALA_HI20"),
+            Self::LoongArchPcala64Lo20 => write!(f, "PCALA64_LO20"),
+            Self::LoongArchPcala64Hi12 => write!(f, "PCALA64_HI12"),
             Self::PulleyPcRel => write!(f, "PulleyPcRel"),
             Self::PulleyCallIndirectHost => write!(f, "PulleyCallIndirectHost"),
         }
